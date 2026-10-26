@@ -1,0 +1,32 @@
+# Ambiente de desenvolvimento: banco local da aplicação + ERP SIMULADO.
+# Uso: docker compose -f dev/compose.dev.yaml up -d
+# Os dados vivem só nos contêineres: `down` apaga tudo (use para voltar ao estado inicial).
+name: salutem-dev
+services:
+  appdb:
+    image: postgres:16.14-bookworm
+    environment:
+      POSTGRES_DB: salutem
+      POSTGRES_USER: salutem
+      POSTGRES_PASSWORD: dev
+    ports: ["127.0.0.1:5432:5432"]
+    volumes:
+      - ../database/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salutem -d salutem"]
+      interval: 3s
+      retries: 20
+
+  fakeerp:
+    image: postgres:16.14-bookworm
+    environment:
+      POSTGRES_DB: erp
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: erp
+    ports: ["127.0.0.1:5433:5432"]
+    volumes:
+      - ./fake-erp/schema.sql:/docker-entrypoint-initdb.d/10-fake-erp.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp -d erp"]
+      interval: 3s
+      retries: 20

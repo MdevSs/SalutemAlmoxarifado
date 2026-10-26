@@ -1,0 +1,63 @@
+services:
+  database:
+    image: postgres:16.14-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${LOCAL_PG_DATABASE:-salutem}
+      POSTGRES_USER: ${LOCAL_PG_USER:?Defina LOCAL_PG_USER em .env}
+      POSTGRES_PASSWORD: ${LOCAL_PG_PASSWORD:?Defina LOCAL_PG_PASSWORD em .env}
+    volumes:
+      - salutem_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/10-salutem-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - salutem_internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      PORT: "3000"
+      APP_DATABASE_URL: "postgresql+psycopg://${LOCAL_PG_USER}:${LOCAL_PG_PASSWORD}@database:5432/${LOCAL_PG_DATABASE:-salutem}"
+      ERP_DATABASE_URL: ${ERP_DATABASE_URL:?Defina ERP_DATABASE_URL em .env privado}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:?Defina APP_SESSION_SECRET em .env privado}
+      APP_SESSION_HOURS: ${APP_SESSION_HOURS:-12}
+      APP_COOKIE_SECURE: "true"
+      APP_COOKIE_SAMESITE: "none"
+    ports:
+      - "127.0.0.1:${APP_HTTP_PORT:-8080}:3000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - salutem_internal
+
+volumes:
+  salutem_data:
+
+networks:
+  salutem_internal:
+    driver: bridge

@@ -1,0 +1,7 @@
+# Proxy TLS interno (Caddy) para o servidor da LAN. Ajuste o hostname e distribua a CA
+# local do Caddy (tls internal) nos computadores usuários. Não publique na Internet.
+salutem.exemplo.interno {
+	tls internal
+	encode gzip
+	reverse_proxy 127.0.0.1:8080
+}

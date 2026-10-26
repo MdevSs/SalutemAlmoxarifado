@@ -1,0 +1,14 @@
+{
+  "name": "salutem-almoxarifado",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "dev": "concurrently --kill-others --names web,api --prefix-colors green,blue \"pnpm --dir frontend dev --host 0.0.0.0 --port 3000 --strictPort\" \"/home/suporte/SalutemAlmoxarifado/backend/.venv/bin/uv run --project backend uvicorn app.main:app --reload --host 0.0.0.0 --port 8000\"",
+    "dev:local": "concurrently --kill-others --names web,api --prefix-colors green,blue \"pnpm --dir frontend dev --host 0.0.0.0 --port 3000 --strictPort\" \"/home/suporte/SalutemAlmoxarifado/backend/.venv/bin/uv run --project backend uvicorn app.main:app --reload --host 0.0.0.0 --port 8000\"",
+    "build": "pnpm --dir frontend build",
+    "typecheck": "pnpm --dir frontend typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

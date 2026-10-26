@@ -1,0 +1,366 @@
+CREATE OR REPLACE FUNCTION public.fn_toqmovi()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$ 
+DECLARE
+parMov char(1);
+dataOF date;
+dataMov date;
+nrOrdem integer;
+BEGIN 
+   IF (TG_OP = 'INSERT') THEN 
+ 
+     IF NEW.PRIORDEM > 0 THEN 
+       UPDATE ORDEM 
+       SET ORDLOTSTAT = fn_calc_status_ordem(NEW.PRIORDEM, TRUE) 
+       WHERE ORDEM = NEW.PRIORDEM; 
+       nrOrdem = NEW.PRIORDEM; 
+       parMov = (Select RDATUDTMOV from PAREQD2 where PAREQCOD = 1); 
+       dataOF = (Select ORDDTABER from ORDEM where ORDEM = nrOrdem); 
+       dataMov = (Select PRIDATA from TOQMOVI where ITECONTROL = NEW.ITECONTROL AND PRISEQUEN = NEW.PRISEQUEN); 
+       IF parMov = 'S' THEN 
+           IF dataMov < dataOF THEN 
+       			UPDATE ORDEM 
+       			SET ORDDTABER = dataMov 
+       			WHERE ORDEM = nrOrdem; 
+           END IF; 
+       END IF; 
+     END IF; 
+ 
+     RETURN NEW; 
+   ELSE 
+ 
+     IF OLD.PRIORDEM > 0 THEN 
+       UPDATE ORDEM 
+       SET ORDLOTSTAT = fn_calc_status_ordem(OLD.PRIORDEM, TRUE) 
+       WHERE ORDEM = OLD.PRIORDEM; 
+       nrOrdem = OLD.PRIORDEM; 
+       parMov = (Select RDATUDTMOV from PAREQD2 where PAREQCOD = 1); 
+       dataOF = (Select ORDDTABER from ORDEM where ORDEM = nrOrdem); 
+       dataMov = (Select PRIDATA from TOQMOVI where ITECONTROL = OLD.ITECONTROL AND PRISEQUEN = OLD.PRISEQUEN); 
+       IF parMov = 'S' THEN 
+           IF dataMov < dataOF THEN 
+       			UPDATE ORDEM 
+       			SET ORDDTABER = dataMov 
+       			WHERE ORDEM = nrOrdem; 
+           END IF; 
+       END IF; 
+     END IF; 
+ 
+     RETURN OLD; 
+   END IF; 
+END; 
+$function$
+
+CREATE OR REPLACE FUNCTION public.fn_toqmovi_datahora()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+BEGIN
+        NEW.PRIDTALT := current_date;
+        NEW.PRIHRALT := to_char(current_timestamp, 'HH24:MI:SS');
+        RETURN NEW;
+END;
+$function$
+
+CREATE OR REPLACE FUNCTION public.fn_toqmovi_saldo()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+	valedoc boolean;
+	dtposi date;
+	wclascod char(5);
+BEGIN
+	valedoc = false;
+	if(TG_OP = 'INSERT') then
+		valedoc = (select fn_valedoc(new.itecontrol, new.pritransac, new.operacao, false));
+		if valedoc = true then
+			dtposi = (select pt.ptodata from positoq as pt order by pt.ptodata desc limit 1);
+			if dtposi is not null then
+			    if (new.pritransac > 0 and new.pritransac < 7) or new.pritransac = 9 or new.pritransac = 18
+then
+				    if exists(select * from possali1 po where po.psidata = dtposi and po.deposito =
+new.prideposit and po.produto = new.priproduto) then
+					    update possali1 as po
+						    set psisldatu = (po.psisldatu + new.priquanti)
+						    where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+				    else
+					if not exists(select * from possalim pm where pm.produto = new.priproduto) then
+					        wclascod = '';
+					        wclascod = (select p.clascod from produto p where p.produto = new.priproduto);
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = (select p.grupo from
+produto p where p.produto = new.priproduto)
+								        and s.suisubgrup = (select p.subgrupo from produto p where p.produto =
+new.priproduto) limit 1);
+					        end if;
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = (select p.grupo from
+produto p where p.produto = new.priproduto) limit 1);
+					        end if;
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = 0 limit 1);
+					        end if;
+						if not exists(select * from possalim pm where pm.produto = new.priproduto) then
+							begin
+								insert into possalim
+									select
+									dtposi,
+									new.priproduto,
+									0,
+									(select c.classifica from classi c where c.clascod = wclascod),
+									(select g.planoc from grupo1 g where g.grupo = (select p.grupo from produto p where
+p.produto = new.priproduto)
+													and g.subgrupo = (select p.subgrupo from produto p where p.produto = new.priproduto));
+							exception when unique_violation then
+								raise notice 'Produto % já existe na tabela possalim!', new.priproduto;
+							end;
+						end if;
+					end if;
+					if not exists(select * from possali1 po where po.psidata = dtposi and po.deposito =
+new.prideposit and po.produto = new.priproduto) then
+						begin
+							insert into possali1
+								select
+								dtposi,
+								new.priproduto,
+								new.prideposit,
+								0,
+								new.priquanti,
+								0;
+						exception when unique_violation then
+							update possali1 as po
+							    set psisldatu = (po.psisldatu + new.priquanti)
+							    where po.produto = new.priproduto
+							    and po.deposito = new.prideposit
+							    and po.psidata = dtposi;
+						end;
+					else
+						update possali1 as po
+						    set psisldatu = (po.psisldatu + new.priquanti)
+						    where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+					end if;
+				    end if;
+			    end if;
+			    if (new.pritransac > 10 and new.pritransac < 17) or new.pritransac = 19 then
+				    if exists(select * from possali1 po where po.psidata = dtposi and po.deposito =
+new.prideposit and po.produto = new.priproduto) then
+					    update possali1 as po
+						    set psisldatu = (po.psisldatu - new.priquanti)
+						    where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+				    else
+					if not exists(select * from possalim pm where pm.produto = new.priproduto) then
+						wclascod = '';
+						wclascod = (select p.clascod from produto p where p.produto = new.priproduto);
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = (select p.grupo from
+produto p where p.produto = new.priproduto)
+								        and s.suisubgrup = (select p.subgrupo from produto p where p.produto =
+new.priproduto) limit 1);
+					        end if;
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = (select p.grupo from
+produto p where p.produto = new.priproduto) limit 1);
+					        end if;
+					        if wclascod = '' then
+						        wclascod = (select s.suiclascod from suimpos s where s.suigrupo = 0 limit 1);
+					        end if;
+						if not exists(select * from possalim pm where pm.produto = new.priproduto) then
+							begin
+								insert into possalim
+									select
+									dtposi,
+									new.priproduto,
+									0,
+									(select c.classifica from classi c where c.clascod = wclascod),
+									(select g.planoc from grupo1 g where g.grupo = (select p.grupo from produto p where
+p.produto = new.priproduto)
+													and g.subgrupo = (select p.subgrupo from produto p where p.produto = new.priproduto));
+							exception when unique_violation then
+								raise notice 'Produto % já existe na tabela possalim!', new.priproduto;
+							end;
+						end if;
+					end if;
+					if not exists(select * from possali1 po where po.psidata = dtposi and po.deposito =
+new.prideposit and po.produto = new.priproduto) then
+						begin
+							insert into possali1
+								select
+								dtposi,
+								new.priproduto,
+								new.prideposit,
+								0,
+								(new.priquanti * -1),
+								0;
+						exception when unique_violation then
+							update possali1 as po
+							    set psisldatu = (po.psisldatu - new.priquanti)
+							    where po.produto = new.priproduto
+							    and po.deposito = new.prideposit
+							    and po.psidata = dtposi;
+						end;
+					else
+						update possali1 as po
+						    set psisldatu = (po.psisldatu - new.priquanti)
+						    where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+					end if;
+				    end if;
+			    end if;
+           end if;
+		end if;
+		return new;
+	end if;
+	if(TG_OP = 'UPDATE') then
+		if (old.pridata <> new.pridata) or (old.priquanti <> new.priquanti) or (old.prideposit <>
+new.prideposit) or
+		(old.priproduto <> new.priproduto) or (old.pritransac <> new.pritransac) then
+			valedoc = (select fn_valedoc(new.itecontrol, new.pritransac, new.operacao, false));
+			if valedoc = true then
+				dtposi = (select pt.ptodata from positoq as pt order by pt.ptodata desc limit 1);
+				if dtposi is not null then
+				    if (old.pritransac > 0 and old.pritransac < 7) or old.pritransac = 9 or old.pritransac = 18
+then
+					    update possali1 as po
+						    set psisldatu = (po.psisldatu - old.priquanti)
+						    where po.produto = old.priproduto
+						    and po.deposito = old.prideposit
+						    and po.psidata = dtposi;
+				    end if;
+				    if (old.pritransac > 10 and old.pritransac < 17) or old.pritransac = 19 then
+					    update possali1 as po
+						    set psisldatu = (po.psisldatu + old.priquanti)
+						    where po.produto = old.priproduto
+						    and po.deposito = old.prideposit
+						    and po.psidata = dtposi;
+				    end if;
+				    if (new.pritransac > 0 and new.pritransac < 7) or new.pritransac = 9 or new.pritransac = 18
+then
+					    update possali1 as po
+					    set psisldatu = (po.psisldatu + new.priquanti)
+						    where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+				    end if;
+				    if (new.pritransac > 10 and new.pritransac < 17) or new.pritransac = 19 then
+					    update possali1 as po
+						    set psisldatu = (po.psisldatu - new.priquanti)
+					    	where po.produto = new.priproduto
+						    and po.deposito = new.prideposit
+						    and po.psidata = dtposi;
+				    end if;
+			    end if;
+			end if;
+		end if;
+		return new;
+	end if;
+	if(TG_OP = 'DELETE') then
+		valedoc = (select fn_valedoc(old.itecontrol, old.pritransac, old.operacao, false));
+		if valedoc = true then
+			dtposi = (select pt.ptodata from positoq as pt order by pt.ptodata desc limit 1);
+			if dtposi is not null then
+			    if (old.pritransac > 0 and old.pritransac < 7) or old.pritransac = 9 or old.pritransac = 18
+then
+				    update possali1 as po
+					    set psisldatu = (po.psisldatu - old.priquanti)
+					    where po.produto = old.priproduto
+					    and po.deposito = old.prideposit
+					    and po.psidata = dtposi;
+			    end if;
+			    if (old.pritransac > 10 and old.pritransac < 17) or old.pritransac = 19 then
+				    update possali1 as po
+					    set psisldatu = (po.psisldatu + old.priquanti)
+					    where po.produto = old.priproduto
+					    and po.deposito = old.prideposit
+					    and po.psidata = dtposi;
+			    end if;
+			end if;
+		end if;
+		return old;
+	end if;
+END;
+$function$
+
+CREATE OR REPLACE FUNCTION public.fn_valedoc(pcontrole bigint, ptransacao numeric, poperacao character, pexclusao boolean)
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+    valedocto boolean;
+	vldig boolean;
+	anulada boolean;
+BEGIN
+	valedocto = false;
+	vldig = false;
+	anulada = false;
+	
+	if exists (select 1 from doctos d where d.controle = pcontrole) then
+		execute 'select
+			case
+				when (d.notdtdigit <> ''' || '0001-01-01' || '''::date or ' || pexclusao || ' = true) then true
+				else false
+			end,
+			case
+				when substr(d.notobsfisc, 1, 10) = ''' || 'NF ANULADA' || ''' then true
+				else false
+			end,
+			case
+				when length(trim(''' || poperacao || ''')) = 0 then d.operacao
+				else ''' || poperacao || '''
+			end
+		from doctos d
+		where d.controle = ' || pcontrole || '' into vldig, anulada, poperacao;
+	end if;
+
+	if poperacao = 'TRANSFER' then
+		RETURN true;
+	end if;
+	
+	if anulada = false then
+		if ptransacao in (3,4,6,8,14,13,16,17,18) then
+			valedocto = true;
+		else
+			valedocto = vldig;
+			if (select o.opetoq from opera as o where o.operacao = poperacao) <> 'S' then
+				valedocto = false;
+			end if;
+		end if;
+	end if;
+
+	RETURN valedocto;
+END;
+$function$
+
+14|84332|2029-06-28
+12|84316|2026-10-19
+1|84315|2026-10-19
+4|84312|9015-09-10
+9|84303|2026-10-16
+2|84222|2026-10-15
+19|84208|2026-10-15
+0|83975|2026-10-14
+11|83065|2026-09-30
+3|74268|2026-07-23
+seq_cad_controle|
+seq_cad_logs|
+seq_cad_lote|
+seq_lgpd_logs|1522833
+84328|1|2026-10-19|12.016.0001|14|1.0000|2026-10-19|09:52:04
+84329|1|2026-10-19|10.099.0288|14|40.0000|2026-10-19|09:58:27
+84330|1|2026-10-19|10.021.0104|14|100.0000|2026-10-19|09:59:07
+84331|1|2026-10-21|10.001.0007|14|10.0000|2026-10-21|09:42:16
+84332|1|2026-10-21|10.001.0007|14|10.0000|2026-10-21|10:35:19
