@@ -1,0 +1,8 @@
+node_modules
+backend/.venv*
+*.egg-info/
+SOURCES
+top_level
+*pycache*
+*cache*
+assets
