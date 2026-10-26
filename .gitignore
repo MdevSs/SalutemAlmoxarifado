@@ -1,7 +1,7 @@
 node_modules
 backend/.venv*
 *.egg-info/
-backend/!require*
+backend/*.egg-info/!require*
 SOURCES
 top_level
 *pycache*
