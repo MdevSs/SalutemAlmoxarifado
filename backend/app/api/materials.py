@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.security import CurrentSector, get_current_sector
-from app.schemas.contracts import ProductPage, ProductRead
+from app.schemas.contracts import ProductPage, ProductRead, ProductUnitRead
 from app.services.erp import list_products
 
 router = APIRouter(prefix="/materials", tags=["Catálogo ERP"])
@@ -24,6 +24,18 @@ async def materials(
                 stock=row.stock,
                 deposit=row.deposit,
                 group=row.group,
+                default_unit=row.default_unit,
+                unit_options=[
+                    ProductUnitRead(
+                        code=unit.code,
+                        description=unit.description,
+                        operation=unit.operation,
+                        coefficient=unit.coefficient,
+                        result=unit.result,
+                        is_default=unit.is_default,
+                    )
+                    for unit in row.unit_options
+                ],
             )
             for row in rows
         ],

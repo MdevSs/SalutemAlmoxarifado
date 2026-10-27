@@ -8,7 +8,7 @@ Sistema interno para solicitar e atender materiais da Salutem Hospitalares. A ap
 
 Há duas conexões PostgreSQL independentes:
 
-1. **Banco ERP existente:** código/descrição/saldo são consultados na `public.vw_produto_saldo_estoque`; `public.produto` é cruzada somente para filtrar `prostatus = 'A'` e códigos dos grupos `10` a `13`; movimentos confirmados são inseridos na `public.toqmovi`. A aplicação não atualiza `produto` nem faz baixa paralela do saldo: a transação `pritransac=14` e os gatilhos do ERP devem executar a movimentação.
+1. **Banco ERP existente:** código/descrição/saldo são consultados na `public.vw_produto_saldo_estoque`; `public.produto` é cruzada para filtrar `prostatus = 'A'`, ler `unimedida` e restringir códigos aos grupos `10` a `13`; as unidades alternativas são lidas em lote da tabela `public.convers1`. Movimentos confirmados são inseridos na `public.toqmovi`. A aplicação não atualiza `produto`, `convers1` nem faz baixa paralela do saldo: a transação `pritransac=14` e os gatilhos do ERP devem executar a movimentação.
 2. **Banco novo local da aplicação:** fica no serviço `database` do Compose, num volume persistente do servidor (ou PostgreSQL local no modo PowerShell de desenvolvimento). O schema de negócio tem somente duas tabelas, `setores` e `requisicoes`; a linha especial Administrador e os dados de setor compartilham `setores`, e itens/eventos de requisições ficam em JSONB. Uma sequence PostgreSQL (não uma tabela) gera controles a partir de `84333`.
 
 O ERP é a autoridade do estoque. A aplicação primeiro registra a requisição local como pendente; no atendimento, todos os movimentos são enviados em uma única transação ERP. Como os bancos não compartilham transação ACID, uma queda durante a resposta pode deixar o status local pendente. A rotina reconcilia pelo par `(itecontrol, prisequen)` e compara os valores antes de qualquer repetição; divergência vira conflito para revisão, nunca sobrescrita ou reenvio cego.
@@ -33,7 +33,7 @@ O dump anexado foi lido como referência, não executado. Ele contém `CREATE DA
 
 Para desenvolvimento ou validação numa máquina Windows, também é possível usar PostgreSQL instalado localmente e executar React/FastAPI pelo PowerShell, sem Docker; veja **Execução local pelo PowerShell (sem Docker)** abaixo. Isso não substitui a implantação do servidor na LAN para acessar o ERP real.
 
-Peça ao DBA do ERP o menor privilégio possível: `SELECT` na view de catálogo/saldo e em `produto` (para filtrar `prostatus`); `SELECT` em `toqmovi` para reconciliar e `INSERT` em `toqmovi` para gravar movimentos. A validação deve confirmar se os gatilhos também precisam de privilégios em funções/objetos relacionados. Não conceda `UPDATE`/`DELETE` em produto/estoque à aplicação.
+Peça ao DBA do ERP o menor privilégio possível: `SELECT` na view de catálogo/saldo, nas colunas usadas de `public.produto` (incluindo `unimedida`) e nas colunas de conversão de `public.convers1`; `SELECT` em `toqmovi` para reconciliar e `INSERT` em `toqmovi` para gravar movimentos. Nenhuma migração/alteração de schema ERP é necessária. A validação deve confirmar se os gatilhos também precisam de privilégios em funções/objetos relacionados. Não conceda `UPDATE`/`DELETE` em produto/conversões/estoque à aplicação.
 
 ## Instalação inicial no servidor LAN
 

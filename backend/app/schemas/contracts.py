@@ -72,12 +72,23 @@ class CsrfResponse(BaseModel):
     csrf_token: str
 
 
+class ProductUnitRead(BaseModel):
+    code: str
+    description: str
+    operation: Literal["M", "D"]
+    coefficient: Decimal
+    result: str
+    is_default: bool = False
+
+
 class ProductRead(BaseModel):
     code: str
     description: str
     stock: Decimal
     deposit: int
     group: str
+    default_unit: str
+    unit_options: list[ProductUnitRead]
 
 
 class ProductPage(BaseModel):
@@ -90,6 +101,7 @@ class ProductPage(BaseModel):
 class RequestItemCreate(BaseModel):
     material_code: str = Field(min_length=1, max_length=16)
     quantity: Decimal = Field(gt=0, max_digits=14, decimal_places=0)
+    unit_code: str | None = Field(default=None, min_length=1, max_length=6)
 
     @field_validator("material_code")
     @classmethod
@@ -97,6 +109,16 @@ class RequestItemCreate(BaseModel):
         code = value.strip()
         if not code:
             raise ValueError("Código de produto obrigatório.")
+        return code
+
+    @field_validator("unit_code")
+    @classmethod
+    def clean_unit_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if not code:
+            raise ValueError("Selecione uma unidade de medida.")
         return code
 
 
@@ -158,6 +180,12 @@ class RequestItemRead(BaseModel):
     description: str
     requested_quantity: Decimal
     delivered_quantity: Decimal | None
+    requested_unit_quantity: Decimal | None = None
+    delivered_unit_quantity: Decimal | None = None
+    unit_code: str | None = None
+    unit_description: str | None = None
+    default_unit: str | None = None
+    conversion_result: str | None = None
 
 
 class RequestRead(BaseModel):

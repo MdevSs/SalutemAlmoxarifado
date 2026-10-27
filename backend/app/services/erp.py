@@ -9,10 +9,12 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import erp_connection
 
 QUANTITY_STEP = Decimal("0.0001")
+MAX_ERP_QUANTITY = Decimal("9999999999.9999")
 CONTROL_START = 84333
 _CATALOG_GROUPS = ("10.%", "11.%", "12.%", "13.%")
 _ERP_AUDIT_COLUMNS = ("pridtalt", "prihralt")
@@ -155,6 +157,18 @@ class Product:
     stock: Decimal
     deposit: int
     group: str
+    default_unit: str = "UN"
+    unit_options: tuple["UnitOption", ...] = ()
+
+
+@dataclass(frozen=True)
+class UnitOption:
+    code: str
+    description: str
+    operation: str
+    coefficient: Decimal
+    result: str
+    is_default: bool = False
 
 
 def _group_from_code(code: str) -> str:
@@ -162,6 +176,138 @@ def _group_from_code(code: str) -> str:
     if len(parts) >= 3:
         return ".".join(parts[:2])
     return "OUTROS"
+
+
+def _load_unit_options(
+    connection: Connection, codes: list[str], default_units: dict[str, str]
+) -> dict[str, tuple[UnitOption, ...]]:
+    options: dict[str, list[UnitOption]] = {}
+    for code in codes:
+        default_unit = default_units.get(code, "").strip().upper()
+        options[code] = (
+            [
+                UnitOption(
+                    code=default_unit,
+                    description="Unidade padrão",
+                    operation="M",
+                    coefficient=Decimal("1.0000"),
+                    result=f"1 {default_unit} = 1 {default_unit}",
+                    is_default=True,
+                )
+            ]
+            if default_unit
+            else []
+        )
+    if not codes:
+        return {code: tuple(value) for code, value in options.items()}
+
+    query = text("""
+        SELECT
+            btrim(c.convprod::text) AS code,
+            upper(btrim(c.cvunidade::text)) AS unit_code,
+            upper(btrim(c.cvuopera::text)) AS operation,
+            c.cvucoefici::numeric(15,4) AS coefficient,
+            btrim(c.cvuresulta::text) AS result,
+            btrim(c.cvunidesc::text) AS description
+        FROM public.convers1 AS c
+        WHERE btrim(c.convprod::text) IN :codes
+        ORDER BY code, unit_code
+    """).bindparams(bindparam("codes", expanding=True))
+    try:
+        rows = connection.execute(query, {"codes": codes}).mappings().all()
+    except SQLAlchemyError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível consultar as conversões de unidade do ERP; confirme o acesso de leitura à tabela convers1.",
+        ) from error
+
+    found: dict[tuple[str, str], UnitOption] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    for row in rows:
+        code = str(row["code"] or "").strip()
+        unit_code = str(row["unit_code"] or "").strip().upper()
+        default_unit = default_units.get(code, "").strip().upper()
+        operation = str(row["operation"] or "").strip().upper()
+        try:
+            coefficient = Decimal(str(row["coefficient"] or "0"))
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if (
+            code not in options
+            or not unit_code
+            or unit_code == default_unit
+            or operation not in {"M", "D"}
+            or not coefficient.is_finite()
+            or coefficient <= 0
+        ):
+            continue
+        key = (code, unit_code)
+        option = UnitOption(
+            code=unit_code,
+            description=str(row["description"] or "").strip() or unit_code,
+            operation=operation,
+            coefficient=coefficient.quantize(QUANTITY_STEP),
+            result=str(row["result"] or "").strip(),
+        )
+        previous = found.get(key)
+        if previous is not None and previous != option:
+            ambiguous.add(key)
+        else:
+            found[key] = option
+    for key, option in found.items():
+        if key not in ambiguous:
+            options[key[0]].append(option)
+    return {code: tuple(value) for code, value in options.items()}
+
+
+def convert_quantity_to_default(
+    *, quantity: Decimal, product: Product, unit_code: str
+) -> tuple[Decimal, UnitOption]:
+    selected = unit_code.strip().upper()
+    if not selected or not product.default_unit.strip():
+        raise HTTPException(status_code=422, detail="Unidade padrão do produto não informada no ERP.")
+    if not quantity.is_finite() or quantity < 0 or quantity != quantity.to_integral_value():
+        raise HTTPException(
+            status_code=422, detail="As quantidades digitadas devem ser números inteiros não negativos."
+        )
+    default_unit = product.default_unit.strip().upper()
+    if selected == default_unit:
+        option = UnitOption(
+            code=default_unit,
+            description="Unidade padrão",
+            operation="M",
+            coefficient=Decimal("1.0000"),
+            result=f"1 {default_unit} = 1 {default_unit}",
+            is_default=True,
+        )
+    else:
+        option = next((unit for unit in product.unit_options if unit.code == selected), None)
+        if option is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"A unidade {selected} não possui conversão válida cadastrada para {product.code}.",
+            )
+    if quantity == 0:
+        return Decimal("0.0000"), option
+    if not option.coefficient.is_finite() or option.coefficient <= 0:
+        raise HTTPException(status_code=422, detail="Coeficiente de conversão inválido no ERP.")
+    try:
+        if option.operation == "M":
+            converted = quantity * option.coefficient
+        elif option.operation == "D":
+            converted = quantity / option.coefficient
+        else:
+            raise HTTPException(status_code=422, detail="Operação de conversão inválida no ERP.")
+        converted = converted.quantize(QUANTITY_STEP, rounding=ROUND_HALF_UP)
+    except InvalidOperation as error:
+        raise HTTPException(status_code=422, detail="Quantidade fora do limite numeric(14,4) do ERP.") from error
+    if converted > MAX_ERP_QUANTITY:
+        raise HTTPException(status_code=422, detail="Quantidade fora do limite numeric(14,4) do ERP.")
+    if converted <= 0:
+        raise HTTPException(
+            status_code=422, detail="A quantidade convertida para a unidade padrão deve ser positiva."
+        )
+    return converted, option
 
 
 def _catalog_query(search: str = "") -> tuple[str, dict[str, Any]]:
@@ -185,7 +331,8 @@ def _catalog_query(search: str = "") -> tuple[str, dict[str, Any]]:
             btrim(s.codigo_produto_saldo_estoque::text) AS code,
             btrim(s.descricao_produto_saldo_estoque::text) AS description,
             s.qtde_sldatu_saldo_estoque::numeric(14,4) AS stock,
-            s.codigo_deposito_saldo_estoque::integer AS deposit
+            s.codigo_deposito_saldo_estoque::integer AS deposit,
+            upper(btrim(p.unimedida::text)) AS default_unit
         FROM public.vw_produto_saldo_estoque AS s
         JOIN public.produto AS p
           ON p.produto = btrim(s.codigo_produto_saldo_estoque::text)::char(16)
@@ -221,8 +368,14 @@ def list_products(
             .mappings()
             .all()
         )
-    has_more = len(rows) > limit
-    rows = rows[:limit]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        codes = [row["code"] for row in rows]
+        defaults = {
+            row["code"]: str(row.get("default_unit") or "").strip().upper()
+            for row in rows
+        }
+        unit_options = _load_unit_options(connection, codes, defaults)
     products = [
         Product(
             code=row["code"],
@@ -230,6 +383,8 @@ def list_products(
             stock=Decimal(row["stock"] or 0).quantize(QUANTITY_STEP),
             deposit=int(row["deposit"]),
             group=_group_from_code(row["code"]),
+            default_unit=defaults[row["code"]],
+            unit_options=unit_options.get(row["code"], ()),
         )
         for row in rows
     ]
@@ -253,7 +408,8 @@ def find_products(connection: Connection, codes: list[str]) -> dict[str, Product
             btrim(s.codigo_produto_saldo_estoque::text) AS code,
             btrim(s.descricao_produto_saldo_estoque::text) AS description,
             s.qtde_sldatu_saldo_estoque::numeric(14,4) AS stock,
-            s.codigo_deposito_saldo_estoque::integer AS deposit
+            s.codigo_deposito_saldo_estoque::integer AS deposit,
+            upper(btrim(p.unimedida::text)) AS default_unit
         FROM public.vw_produto_saldo_estoque AS s
         JOIN public.produto AS p
           ON p.produto = btrim(s.codigo_produto_saldo_estoque::text)::char(16)
@@ -261,6 +417,11 @@ def find_products(connection: Connection, codes: list[str]) -> dict[str, Product
           AND btrim(s.codigo_produto_saldo_estoque::text) IN :codes
     """).bindparams(bindparam("codes", expanding=True))
     rows = connection.execute(query, {**_catalog_params(), "codes": codes}).mappings().all()
+    defaults = {
+        row["code"]: str(row.get("default_unit") or "").strip().upper()
+        for row in rows
+    }
+    unit_options = _load_unit_options(connection, [row["code"] for row in rows], defaults)
     return {
         row["code"]: Product(
             code=row["code"],
@@ -268,6 +429,8 @@ def find_products(connection: Connection, codes: list[str]) -> dict[str, Product
             stock=Decimal(row["stock"] or 0).quantize(QUANTITY_STEP),
             deposit=int(row["deposit"]),
             group=_group_from_code(row["code"]),
+            default_unit=defaults[row["code"]],
+            unit_options=unit_options.get(row["code"], ()),
         )
         for row in rows
     }
@@ -310,19 +473,31 @@ def post_requisition(*, itecontrol: int, requested_date: date, items: list[dict[
             quantity = Decimal(str(item.get("delivered_quantity") or "0"))
         except (InvalidOperation, TypeError, ValueError) as error:
             raise HTTPException(
-                status_code=422, detail="As quantidades atendidas precisam ser números inteiros."
+                status_code=422, detail="A quantidade convertida precisa ser numérica."
             ) from error
-        if not quantity.is_finite() or quantity != quantity.to_integral_value():
+        if not quantity.is_finite() or quantity < 0:
             raise HTTPException(
-                status_code=422, detail="As quantidades atendidas precisam ser números inteiros."
+                status_code=422,
+                detail="A quantidade convertida para o ERP pode ter no máximo quatro casas decimais.",
+            )
+        try:
+            normalized = quantity.quantize(QUANTITY_STEP, rounding=ROUND_HALF_UP)
+        except InvalidOperation as error:
+            raise HTTPException(
+                status_code=422,
+                detail="A quantidade convertida excede o limite numeric(14,4) do ERP.",
+            ) from error
+        if quantity != normalized or normalized > MAX_ERP_QUANTITY:
+            raise HTTPException(
+                status_code=422,
+                detail="A quantidade convertida para o ERP deve caber em numeric(14,4) e ter até quatro casas decimais.",
             )
         quantities.append((item, quantity))
-        # positive_items = [(item, quantity) for item, quantity in quantities if quantity > 0]
-        # if not positive_items:
-        #     raise HTTPException(
-        #         status_code=422,
-        #         detail="A confirmação precisa retirar pelo menos uma quantidade positiva.",
-        #     )
+    if not any(quantity > 0 for _, quantity in quantities):
+        raise HTTPException(
+            status_code=422,
+            detail="A confirmação precisa retirar pelo menos uma quantidade positiva.",
+        )
     expected = []
     for item, whole_quantity in quantities:
         quantity = whole_quantity.quantize(QUANTITY_STEP, rounding=ROUND_HALF_UP)

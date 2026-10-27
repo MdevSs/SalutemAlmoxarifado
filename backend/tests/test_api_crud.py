@@ -205,6 +205,8 @@ def test_all_catalog_queries_include_only_active_products(monkeypatch: pytest.Mo
                     for index in range(21)
                 ]
                 return Result(rows)
+            if "from public.convers1" in str(statement).lower():
+                return Result()
             return Result()
 
     fake_connection = Connection()
@@ -221,15 +223,70 @@ def test_all_catalog_queries_include_only_active_products(monkeypatch: pytest.Mo
     assert cached_products == products
     assert cached_has_more is True
     assert erp.find_products(cast(SQLAlchemyConnection, fake_connection), ["10.001.0007"]) == {}
-    assert len(queries) == 2
-    assert all("p.prostatus = 'a'" in query for query in queries)
-    assert all("join public.produto as p" in query for query in queries)
-    assert all(":group_10" in query and ":group_11" in query for query in queries)
-    assert all(":group_12" in query and ":group_13" in query for query in queries)
+    product_queries = [query for query in queries if "from public.vw_produto_saldo_estoque" in query]
+    assert len(queries) == 3
+    assert len(product_queries) == 2
+    assert all("p.prostatus = 'a'" in query for query in product_queries)
+    assert all("join public.produto as p" in query for query in product_queries)
+    assert all(":group_10" in query and ":group_11" in query for query in product_queries)
+    assert all(":group_12" in query and ":group_13" in query for query in product_queries)
+    assert "from public.convers1" in queries[1]
+    assert "unimedida" in queries[0]
     assert "limit :fetch_limit" in queries[0]
     assert "count(" not in queries[0]
     assert parameters[0]["fetch_limit"] == 21
     assert parameters[0]["term"] == "%Parafuso%4,5%"
+
+
+def test_unit_conversion_reads_batched_rows_and_rounds_to_four_places(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queries: list[str] = []
+
+    class Result:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self.rows = rows
+
+        def mappings(self) -> "Result":
+            return self
+
+        def all(self) -> list[dict[str, Any]]:
+            return self.rows
+
+    class Connection:
+        def execute(self, statement: Any, params: dict[str, Any] | None = None) -> Result:
+            query = str(statement).lower()
+            queries.append(query)
+            if "fetch_limit" in (params or {}):
+                return Result([{
+                    "code": "10.001.0008", "description": "Produto teste",
+                    "stock": Decimal("100.0000"), "deposit": 1, "default_unit": "UN",
+                }])
+            return Result([
+                {"code": "10.001.0008", "unit_code": "KG", "operation": "D", "coefficient": Decimal("21.1950"), "result": "1 KG = 0.0472 UN", "description": "KILOGRAMA"},
+                {"code": "10.001.0008", "unit_code": "PT", "operation": "M", "coefficient": Decimal("1.0000"), "result": "1 PT = 1.0000 UN", "description": "PACOTE"},
+            ])
+
+    fake_connection = Connection()
+
+    @contextmanager
+    def fake_erp_connection():
+        yield fake_connection
+
+    monkeypatch.setattr(erp, "erp_connection", fake_erp_connection)
+    erp._CATALOG_CACHE.clear()
+    products, _ = erp.list_products("uom-fixture-2026")
+    product = products[0]
+    assert product.default_unit == "UN"
+    assert [unit.code for unit in product.unit_options] == ["UN", "KG", "PT"]
+    kg = next(unit for unit in product.unit_options if unit.code == "KG")
+    converted, _ = erp.convert_quantity_to_default(
+        quantity=Decimal(10), product=product, unit_code="KG"
+    )
+    assert converted == Decimal("0.4718")
+    assert kg.operation == "D" and kg.coefficient == Decimal("21.1950")
+    assert len(queries) == 2
+    assert "from public.convers1" in queries[1]
 
 
 def test_auth_uses_sector_password_cookie_and_csrf(client: TestClient) -> None:
@@ -535,6 +592,74 @@ def test_request_posts_control_from_84333_and_records_responsible(
     assert captured[0]["items"][0]["delivered_quantity"] == "10.0000"
 
 
+def test_request_and_warehouse_use_integer_input_then_post_canonical_unit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    product = erp.Product(
+        "10.001.0008", "Produto conversível", Decimal("100.0000"), 1, "10.001",
+        default_unit="UN",
+        unit_options=(
+            erp.UnitOption("CX", "CAIXA", "M", Decimal("20.0000"), "1 CX = 20 UN"),
+            erp.UnitOption("KG", "KILOGRAMA", "D", Decimal("2.0000"), "1 KG = 0.5000 UN"),
+        ),
+    )
+    fake_connection = FakeControlConnection()
+    captured: list[dict[str, Any]] = []
+
+    @contextmanager
+    def fake_erp_connection():
+        yield fake_connection
+
+    monkeypatch.setattr(request_api, "erp_connection", fake_erp_connection)
+    monkeypatch.setattr(
+        request_api, "find_products", lambda _connection, codes: {code: product for code in codes}
+    )
+
+    def record_post(*, itecontrol: int, requested_date: date, items: list[dict[str, Any]]) -> bool:
+        captured.append({"itecontrol": itecontrol, "requested_date": requested_date, "items": items})
+        return False
+
+    monkeypatch.setattr(request_api, "post_requisition", record_post)
+    csrf = login(client, 1, "senha-setor-teste-123")
+    created = client.post(
+        "/api/requests", headers={"X-CSRF-Token": csrf},
+        json={
+            "requested_date": date.today().isoformat(),
+            "items": [
+                {"material_code": product.code, "quantity": 2, "unit_code": "CX"},
+                {"material_code": product.code, "quantity": 10, "unit_code": "KG"},
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    request = created.json()
+    assert len(request["items"]) == 2
+    assert Decimal(str(request["items"][0]["requested_quantity"])) == Decimal("40.0000")
+    assert Decimal(str(request["items"][1]["requested_quantity"])) == Decimal("5.0000")
+    assert request["items"][0]["unit_code"] == "CX"
+    assert request["items"][1]["unit_code"] == "KG"
+
+    csrf = login(client, 2, "senha-almox-teste-1234")
+    control = request["itecontrol"]
+    assert client.post(f"/api/requests/{control}/start", headers={"X-CSRF-Token": csrf}).status_code == 200
+    finished = client.post(
+        f"/api/requests/{control}/finalize", headers={"X-CSRF-Token": csrf},
+        json={
+            "responsible_name": "Maria", "warehouse_notes": "Atendimento parcial",
+            "deliveries": [
+                {"item_index": 1, "quantity": 1},
+                {"item_index": 2, "quantity": 5},
+            ],
+        },
+    )
+    assert finished.status_code == 200, finished.text
+    assert finished.json()["status"] == "Parcial"
+    assert Decimal(str(finished.json()["items"][0]["delivered_unit_quantity"])) == Decimal(1)
+    assert Decimal(str(finished.json()["items"][0]["delivered_quantity"])) == Decimal("20.0000")
+    assert captured[0]["items"][0]["delivered_quantity"] == "20.0000"
+    assert captured[0]["items"][1]["delivered_quantity"] == "2.5000"
+
+
 class FakeResult:
     def __init__(self, rows: list[dict[str, Any]] | None = None):
         self.rows = rows or []
@@ -555,6 +680,8 @@ class FakeERPConnection:
     def execute(self, statement: Any, params: dict[str, Any] | None = None) -> FakeResult:
         sql = str(statement).lower()
         if "pg_advisory_xact_lock" in sql:
+            return FakeResult()
+        if "from public.convers1" in sql:
             return FakeResult()
         if "from public.toqmovi" in sql:
             return FakeResult(self.existing)
@@ -619,12 +746,28 @@ def test_erp_insert_uses_fixed_width_blanks_and_contiguous_sequence(
     assert "doc_controle" not in first and "doc_operacao" not in first and "notdtdigit" not in first
 
 
-def test_erp_adapter_rejects_fractional_quantities_before_opening_connection() -> None:
+def test_erp_adapter_accepts_converted_fraction_and_rejects_more_than_four_places(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeERPConnection()
+
+    @contextmanager
+    def fake_erp_connection():
+        yield fake
+
+    monkeypatch.setattr(erp, "erp_connection", fake_erp_connection)
+    erp.post_requisition(
+        itecontrol=84333,
+        requested_date=date(2026, 10, 21),
+        items=[{"material_code": "10.001.0008", "delivered_quantity": "0.4718"}],
+    )
+    assert fake.inserted[0]["priquanti"] == Decimal("0.4718")
+
     with pytest.raises(HTTPException) as error:
         erp.post_requisition(
             itecontrol=84333,
             requested_date=date(2026, 10, 21),
-            items=[{"material_code": "10.001.0008", "delivered_quantity": "2.5000"}],
+            items=[{"material_code": "10.001.0008", "delivered_quantity": "0.00001"}],
         )
 
     assert error.value.status_code == 422

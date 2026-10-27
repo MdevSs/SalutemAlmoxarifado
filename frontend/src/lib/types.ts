@@ -17,12 +17,23 @@ export interface CurrentUser {
   leader_name: string | null;
 }
 
+export interface ProductUnit {
+  code: string;
+  description: string;
+  operation: 'M' | 'D';
+  coefficient: number;
+  result: string;
+  is_default: boolean;
+}
+
 export interface Product {
   code: string;
   description: string;
   stock: number;
   deposit: number;
   group: string;
+  default_unit: string;
+  unit_options: ProductUnit[];
 }
 
 export interface RequestItem {
@@ -31,6 +42,12 @@ export interface RequestItem {
   description: string;
   requested_quantity: number;
   delivered_quantity: number | null;
+  requested_unit_quantity?: number;
+  delivered_unit_quantity?: number | null;
+  unit_code?: string | null;
+  unit_description?: string | null;
+  default_unit?: string | null;
+  conversion_result?: string | null;
 }
 
 export interface RequestEvent {
@@ -75,5 +92,5 @@ export interface ProductPage {
 export interface RequestCreate {
   requested_date: string;
   delivery_instructions: string;
-  items: Array<{ material_code: string; quantity: number }>;
+  items: Array<{ material_code: string; quantity: number; unit_code?: string }>;
 }

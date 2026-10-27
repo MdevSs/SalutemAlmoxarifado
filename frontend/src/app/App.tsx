@@ -10,7 +10,18 @@ import { api } from '../lib/api';
 import type { CurrentUser, MaterialRequest, RequestCreate } from '../lib/types';
 
 type View = 'catalog' | 'cart' | 'history' | 'kanban' | 'sectors';
-type CartLine = { material_code: string; description: string; stock: number; quantity: number };
+type CartLine = {
+  material_code: string;
+  description: string;
+  stock: number;
+  default_unit: string;
+  unit_code: string;
+  unit_description: string;
+  conversion_result: string;
+  conversion_operation: 'M' | 'D';
+  conversion_coefficient: number;
+  quantity: number;
+};
 type NotificationCursor = { at: string; control: number };
 
 function loadNotificationCursor(sectorId: number): NotificationCursor {
@@ -91,8 +102,8 @@ export default function App() {
 
   function addToCart(line: Omit<CartLine, 'quantity'>, quantity: number) {
     setCart((current) => {
-      const existing = current.find((item) => item.material_code === line.material_code);
-      if (existing) return current.map((item) => item.material_code === line.material_code ? { ...item, quantity: item.quantity + quantity } : item);
+      const existing = current.find((item) => item.material_code === line.material_code && item.unit_code === line.unit_code);
+      if (existing) return current.map((item) => item.material_code === line.material_code && item.unit_code === line.unit_code ? { ...item, quantity: item.quantity + quantity } : item);
       return [...current, { ...line, quantity }];
     });
   }
@@ -131,7 +142,7 @@ export default function App() {
   const canRequest = profile.profile === 'solicitante' || administrator;
   const canWarehouse = warehouse || administrator;
   const displayName = warehouse || administrator ? profile.sector_name : (profile.leader_name ?? profile.sector_name);
-  const cartCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+  const cartCount = cart.length;
 
   return (
     <div className="app-shell">

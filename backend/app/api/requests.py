@@ -2,6 +2,7 @@ import csv
 import io
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +22,14 @@ from app.schemas.contracts import (
     RequestPage,
     RequestRead,
 )
-from app.services.erp import Product, erp_connection, find_products, post_requisition
+from app.services.erp import (
+    Product,
+    UnitOption,
+    convert_quantity_to_default,
+    erp_connection,
+    find_products,
+    post_requisition,
+)
 
 router = APIRouter(prefix="/requests", tags=["Requisições"])
 
@@ -88,20 +96,38 @@ def _json_array_values_match(column, keys: tuple[str, ...], pattern: str, dialec
 
 
 def _serialize(row: Requisicao) -> RequestRead:
-    items = [
-        RequestItemRead(
-            item_index=index,
-            material_code=item["material_code"],
-            description=item["description"],
-            requested_quantity=Decimal(str(item["requested_quantity"])),
-            delivered_quantity=(
-                Decimal(str(item["delivered_quantity"]))
-                if item.get("delivered_quantity") is not None
-                else None
-            ),
+    items = []
+    for index, item in enumerate(row.itens, start=1):
+        conversion = item.get("unit_conversion") or {}
+        requested_quantity = Decimal(str(item["requested_quantity"]))
+        delivered_quantity = (
+            Decimal(str(item["delivered_quantity"]))
+            if item.get("delivered_quantity") is not None
+            else None
         )
-        for index, item in enumerate(row.itens, start=1)
-    ]
+        requested_unit_quantity = Decimal(
+            str(item.get("requested_unit_quantity", item["requested_quantity"]))
+        )
+        delivered_unit_quantity = (
+            Decimal(str(item.get("delivered_unit_quantity", item["delivered_quantity"])))
+            if item.get("delivered_unit_quantity", item.get("delivered_quantity")) is not None
+            else None
+        )
+        items.append(
+            RequestItemRead(
+                item_index=index,
+                material_code=item["material_code"],
+                description=item["description"],
+                requested_quantity=requested_quantity,
+                delivered_quantity=delivered_quantity,
+                requested_unit_quantity=requested_unit_quantity,
+                delivered_unit_quantity=delivered_unit_quantity,
+                unit_code=conversion.get("unit_code"),
+                unit_description=conversion.get("unit_description"),
+                default_unit=conversion.get("default_unit"),
+                conversion_result=conversion.get("result"),
+            )
+        )
     return RequestRead(
         itecontrol=row.itecontrol,
         number=f"REQ-{row.itecontrol}",
@@ -120,6 +146,37 @@ def _serialize(row: Requisicao) -> RequestRead:
         created_at=row.criado_em,
         finalized_at=row.finalizado_em,
     )
+
+
+def _convert_saved_unit_quantity(item: dict[str, Any], quantity: Decimal) -> Decimal:
+    conversion = item.get("unit_conversion") or {}
+    unit_code = str(conversion.get("unit_code") or item.get("unit_code") or "UN").strip().upper()
+    default_unit = str(conversion.get("default_unit") or unit_code).strip().upper()
+    try:
+        coefficient = Decimal(str(conversion.get("coefficient", "1.0000")))
+    except (ArithmeticError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="Snapshot de conversão inválido na requisição.") from error
+    option = UnitOption(
+        code=unit_code,
+        description=str(conversion.get("unit_description") or unit_code),
+        operation=str(conversion.get("operation") or "M").strip().upper(),
+        coefficient=coefficient,
+        result=str(conversion.get("result") or ""),
+        is_default=unit_code == default_unit,
+    )
+    product = Product(
+        code=str(item["material_code"]),
+        description=str(item.get("description") or ""),
+        stock=Decimal(0),
+        deposit=1,
+        group="",
+        default_unit=default_unit,
+        unit_options=() if unit_code == default_unit else (option,),
+    )
+    converted, _ = convert_quantity_to_default(
+        quantity=quantity, product=product, unit_code=unit_code
+    )
+    return converted
 
 
 def _get_request(session: Session, itecontrol: int) -> Requisicao:
@@ -250,27 +307,48 @@ def create_request(
     if payload.requested_date > datetime.now(ZoneInfo("America/Sao_Paulo")).date():
         raise HTTPException(status_code=422, detail="A data da requisição não pode ser futura.")
 
-    combined: dict[str, Decimal] = {}
-    for line in payload.items:
-        combined[line.material_code] = combined.get(line.material_code, Decimal(0)) + line.quantity
+    requested_codes = list(dict.fromkeys(line.material_code for line in payload.items))
     with erp_connection() as connection:
-        products = find_products(connection, list(combined))
-    missing = sorted(set(combined) - products.keys())
+        products = find_products(connection, requested_codes)
+    missing = sorted(set(requested_codes) - products.keys())
     if missing:
         raise HTTPException(
             status_code=422, detail=f"Produtos não encontrados no ERP: {', '.join(missing)}."
         )
 
+    combined: dict[tuple[str, str], Decimal] = {}
+    for line in payload.items:
+        product = products[line.material_code]
+        selected_unit = (line.unit_code or product.default_unit).strip().upper()
+        convert_quantity_to_default(
+            quantity=line.quantity, product=product, unit_code=selected_unit
+        )
+        key = (line.material_code, selected_unit)
+        combined[key] = combined.get(key, Decimal(0)) + line.quantity
+
     items = []
-    for index, (code, quantity) in enumerate(combined.items(), start=1):
+    for index, ((code, unit_code), quantity) in enumerate(combined.items(), start=1):
         product: Product = products[code]
+        converted_quantity, option = convert_quantity_to_default(
+            quantity=quantity, product=product, unit_code=unit_code
+        )
         items.append(
             {
                 "item_index": index,
                 "material_code": product.code,
                 "description": product.description,
-                "requested_quantity": format(quantity, ".4f"),
+                "requested_quantity": format(converted_quantity, ".4f"),
+                "requested_unit_quantity": format(quantity, "f"),
                 "delivered_quantity": None,
+                "delivered_unit_quantity": None,
+                "unit_conversion": {
+                    "unit_code": option.code,
+                    "unit_description": option.description,
+                    "default_unit": product.default_unit,
+                    "operation": option.operation,
+                    "coefficient": format(option.coefficient, ".4f"),
+                    "result": option.result,
+                },
                 "erp_null_fields": {
                     "doc_controle": None,
                     "doc_operacao": None,
@@ -348,9 +426,28 @@ def export_csv(
                     row.erp_status,
                     item["material_code"],
                     item["description"],
-                    item["requested_quantity"],
                     (
-                        item.get("delivered_quantity")
+                        f"{item.get('requested_unit_quantity', item['requested_quantity'])} "
+                        f"{(item.get('unit_conversion') or {}).get('unit_code', '')}"
+                        + (
+                            f" ({item['requested_quantity']} {(item.get('unit_conversion') or {}).get('default_unit', '')})"
+                            if item.get("unit_conversion")
+                            and (item.get("unit_conversion") or {}).get("unit_code")
+                            != (item.get("unit_conversion") or {}).get("default_unit")
+                            else ""
+                        )
+                    ),
+                    (
+                        f"{item.get('delivered_unit_quantity', item.get('delivered_quantity'))} "
+                        f"{(item.get('unit_conversion') or {}).get('unit_code', '')}"
+                        + (
+                            f" ({item.get('delivered_quantity')} {(item.get('unit_conversion') or {}).get('default_unit', '')})"
+                            if item.get("delivered_quantity") is not None
+                            and item.get("unit_conversion")
+                            and (item.get("unit_conversion") or {}).get("unit_code")
+                            != (item.get("unit_conversion") or {}).get("default_unit")
+                            else ""
+                        )
                         if item.get("delivered_quantity") is not None
                         else ""
                     ),
@@ -483,18 +580,24 @@ def finalize_request(
         requested_lines
     ):
         raise HTTPException(status_code=422, detail="Informe a quantidade atendida para cada item.")
+
+    converted_deliveries: dict[int, Decimal] = {}
     for index, item in requested_lines.items():
-        if delivery_lines[index] > Decimal(str(item["requested_quantity"])):
+        requested_unit_quantity = Decimal(
+            str(item.get("requested_unit_quantity", item["requested_quantity"]))
+        )
+        if delivery_lines[index] > requested_unit_quantity:
             raise HTTPException(
                 status_code=422, detail="Quantidade atendida não pode superar a solicitada."
             )
-    if sum(delivery_lines.values(), Decimal(0)) <= 0:
+        converted_deliveries[index] = _convert_saved_unit_quantity(item, delivery_lines[index])
+    if sum(converted_deliveries.values(), Decimal(0)) <= 0:
         raise HTTPException(
             status_code=422,
             detail="Não é permitido confirmar com todas as quantidades iguais a zero.",
         )
     partial = any(
-        delivery_lines[index] < Decimal(str(item["requested_quantity"]))
+        converted_deliveries[index] < Decimal(str(item["requested_quantity"]))
         for index, item in requested_lines.items()
     )
     notes = payload.warehouse_notes.strip()
@@ -504,7 +607,10 @@ def finalize_request(
             detail="Entrega parcial: registre observação ou confirme sem observação.",
         )
 
-    stored_deliveries = [item.get("delivered_quantity") for item in row.itens]
+    stored_deliveries = [
+        item.get("delivered_unit_quantity", item.get("delivered_quantity"))
+        for item in row.itens
+    ]
     if any(value is not None for value in stored_deliveries) and row.erp_status != "revisar_saldo":
         existing = [Decimal(str(value or "0")) for value in stored_deliveries]
         incoming = [delivery_lines[index] for index in requested_lines]
@@ -517,7 +623,8 @@ def finalize_request(
         row.itens = [
             {
                 **item,
-                "delivered_quantity": format(delivery_lines[index], ".4f"),
+                "delivered_quantity": format(converted_deliveries[index], ".4f"),
+                "delivered_unit_quantity": format(delivery_lines[index], "f"),
             }
             for index, item in requested_lines.items()
         ]

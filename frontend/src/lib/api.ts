@@ -63,7 +63,14 @@ export const api = {
   materials: async (search = '', offset = 0, limit = 20) => {
     const query = new URLSearchParams({ search, offset: String(offset), limit: String(limit) });
     const page = await request<ProductPage>(`/materials?${query}`);
-    return { ...page, items: page.items.map((item) => ({ ...item, stock: Number(item.stock) })) };
+    return {
+      ...page,
+      items: page.items.map((item) => ({
+        ...item,
+        stock: Number(item.stock),
+        unit_options: item.unit_options.map((unit) => ({ ...unit, coefficient: Number(unit.coefficient) })),
+      })),
+    };
   },
   requests: async (params: { status?: string; search?: string; date_from?: string; date_to?: string; offset?: number; limit?: number } = {}) => {
     const query = new URLSearchParams();
@@ -112,6 +119,10 @@ function normalizeRequest(request: MaterialRequest): MaterialRequest {
       ...item,
       requested_quantity: Number(item.requested_quantity),
       delivered_quantity: item.delivered_quantity === null ? null : Number(item.delivered_quantity),
+      requested_unit_quantity: Number(item.requested_unit_quantity ?? item.requested_quantity),
+      delivered_unit_quantity: item.delivered_unit_quantity == null
+        ? (item.delivered_quantity === null ? null : Number(item.delivered_quantity))
+        : Number(item.delivered_unit_quantity),
     })),
   };
 }

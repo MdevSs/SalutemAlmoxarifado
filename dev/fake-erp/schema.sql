@@ -1,7 +1,8 @@
 -- ERP SIMULADO, somente para desenvolvimento local. Reproduz só o que a aplicação usa:
---   public.vw_produto_saldo_estoque (leitura)  e  public.toqmovi (INSERT + leitura).
+--   public.vw_produto_saldo_estoque (leitura), public.produto (leitura),
+--   public.convers1 (leitura) e public.toqmovi (INSERT + leitura).
 -- Um gatilho imita o ERP real: transação 14 baixa o saldo e recusa saldo negativo.
--- NUNCA aponte isto (nem o ERP_ALLOWED_HOST=127.0.0.1) para um ambiente de produção.
+-- NUNCA aponte isto (nem ERP_ALLOWED_HOST=127.0.0.1) para um ambiente de produção.
 
 CREATE TABLE public.produto_saldo (
     codigo    char(16)      NOT NULL,
@@ -9,6 +10,23 @@ CREATE TABLE public.produto_saldo (
     deposito  integer       NOT NULL DEFAULT 1,
     saldo     numeric(14,4) NOT NULL DEFAULT 0,
     PRIMARY KEY (codigo, deposito)
+);
+
+CREATE TABLE public.produto (
+    produto    char(16) NOT NULL PRIMARY KEY,
+    pronome    char(50) NOT NULL,
+    prostatus  char(1)  NOT NULL DEFAULT 'A',
+    unimedida  char(6)  NOT NULL DEFAULT 'UN'
+);
+
+CREATE TABLE public.convers1 (
+    convprod   char(16)      NOT NULL,
+    cvunidade  char(6)       NOT NULL,
+    cvuopera   char(1)       NOT NULL CHECK (cvuopera IN ('M', 'D')),
+    cvucoefici numeric(15,4) NOT NULL CHECK (cvucoefici > 0),
+    cvuresulta char(30)      NOT NULL,
+    cvunidesc  char(20)      NOT NULL,
+    PRIMARY KEY (convprod, cvunidade)
 );
 
 CREATE VIEW public.vw_produto_saldo_estoque AS
@@ -62,6 +80,7 @@ FOR EACH ROW EXECUTE FUNCTION public.fn_toqmovi_baixa();
 INSERT INTO public.produto_saldo (codigo, descricao, deposito, saldo) VALUES
     ('10.001.0001', 'Parafuso sextavado inox M8 x 40', 1, 500),
     ('10.001.0007', 'Parafuso inox 6mm', 1, 100),
+    ('10.001.0008', 'Produto de demonstração de conversão', 1, 100),
     ('10.001.0012', 'Porca sextavada inox M8', 1, 800),
     ('10.002.0001', 'Disco de corte 7 pol', 1, 60),
     ('10.002.0004', 'Lixa d''agua grao 220', 1, 150),
@@ -76,3 +95,15 @@ INSERT INTO public.produto_saldo (codigo, descricao, deposito, saldo) VALUES
     ('50.001.0004', 'Oculos de protecao', 1, 40),
     ('50.002.0001', 'Mascara PFF2', 1, 0),
     ('10.001.0001', 'Parafuso sextavado inox M8 x 40', 2, 999);
+
+INSERT INTO public.produto (produto, pronome, prostatus, unimedida)
+SELECT codigo, left(descricao, 50)::char(50), 'A', 'UN'
+FROM public.produto_saldo
+ON CONFLICT (produto) DO NOTHING;
+
+-- Demonstra as duas conversões informadas pelo responsável para um mesmo produto.
+INSERT INTO public.convers1
+    (convprod, cvunidade, cvuopera, cvucoefici, cvuresulta, cvunidesc)
+VALUES
+    ('10.001.0008', 'KG', 'D', 21.1950, '1 KG = 0.0472 UN', 'KILOGRAMA'),
+    ('10.001.0008', 'PT', 'M', 1.0000, '1 PT = 1.0000 UN', 'PACOTE');

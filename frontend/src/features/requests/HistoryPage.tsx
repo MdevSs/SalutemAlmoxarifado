@@ -148,7 +148,7 @@ export default function HistoryPage({ warehouse }: Props) {
     {error && <div className="notice notice-error" role="alert">{error}</div>}
     {loading && <div className="loading-bar" aria-label="Carregando histórico" />}
     <div className="panel table-wrap"><table><thead><tr><th>Controle</th><th>Data</th>{warehouse && <th>Líder / setor</th>}<th>Materiais</th><th>Status</th>{warehouse && <th>ERP</th>}<th></th></tr></thead><tbody>
-      {requests.map((request) => <tr key={request.itecontrol}><td><button className="text-button" onClick={() => setSelected(request)}>{request.number}</button></td><td>{dateLabel(request.requested_date)}</td>{warehouse && <td>{request.leader_name ?? '—'}<small style={{ display: 'block', color: '#77847a' }}>{request.sector_name}</small></td>}<td>{request.items.length} itens · {quantityLabel(request.items.reduce((sum, item) => sum + item.requested_quantity, 0))} un.</td><td><Status status={request.status} /></td>{warehouse && <td><ERPBadge status={request.erp_status} /></td>}<td><button className="icon-button" aria-label={`Detalhes ${request.number}`} onClick={() => setSelected(request)}><FileText size={16} /></button></td></tr>)}
+      {requests.map((request) => <tr key={request.itecontrol}><td><button className="text-button" onClick={() => setSelected(request)}>{request.number}</button></td><td>{dateLabel(request.requested_date)}</td>{warehouse && <td>{request.leader_name ?? '—'}<small style={{ display: 'block', color: '#77847a' }}>{request.sector_name}</small></td>}<td>{request.items.length} {request.items.length === 1 ? 'item' : 'itens'}</td><td><Status status={request.status} /></td>{warehouse && <td><ERPBadge status={request.erp_status} /></td>}<td><button className="icon-button" aria-label={`Detalhes ${request.number}`} onClick={() => setSelected(request)}><FileText size={16} /></button></td></tr>)}
       {!loading && requests.length === 0 && <tr><td colSpan={warehouse ? 7 : 5}><div className="empty-state"><strong>Nenhuma requisição encontrada</strong><p>Revise a busca e os filtros de status ou data.</p></div></td></tr>}
     </tbody></table></div>
     {validDateRange && requests.length < total && <div className="history-load-more"><button className="button button-quiet" onClick={() => void loadMore()} disabled={loadingMore}>{loadingMore ? 'Carregando…' : `Carregar mais ${Math.min(PAGE_SIZE, total - requests.length)} requisições`}</button></div>}
@@ -157,7 +157,17 @@ export default function HistoryPage({ warehouse }: Props) {
       <div className="dialog-body"><div className="toolbar"><Status status={selected.status} /><ERPBadge status={selected.erp_status} /><span className="stock-label">{dateLabel(selected.requested_date)}</span></div>
         <p><strong>{selected.leader_name ?? '—'}</strong> · {selected.sector_name}</p>{selected.delivery_instructions && <p><strong>Instruções:</strong> {selected.delivery_instructions}</p>}
         {selected.erp_error && <div className="notice notice-error">{selected.erp_error}</div>}
-        <div className="table-wrap"><table><thead><tr><th>Material</th><th>Pedido</th><th>Entregue</th></tr></thead><tbody>{selected.items.map((item) => <tr key={item.item_index}><td>{item.description}<small style={{ display: 'block', color: '#77847a' }}>{item.material_code}</small></td><td>{quantityLabel(item.requested_quantity)}</td><td>{item.delivered_quantity === null ? '—' : quantityLabel(item.delivered_quantity)}</td></tr>)}</tbody></table></div>
+        <div className="table-wrap"><table><thead><tr><th>Material</th><th>Pedido</th><th>Entregue</th></tr></thead><tbody>{selected.items.map((item) => {
+          const unit = item.unit_code ?? item.default_unit ?? '';
+          const requestedInUnit = item.requested_unit_quantity ?? item.requested_quantity;
+          const deliveredInUnit = item.delivered_unit_quantity ?? item.delivered_quantity;
+          const converted = Boolean(item.unit_code && item.default_unit && item.unit_code !== item.default_unit);
+          return <tr key={item.item_index}>
+            <td>{item.description}<small style={{ display: 'block', color: '#77847a' }}>{item.material_code}</small></td>
+            <td>{quantityLabel(requestedInUnit)} {unit}{converted && <small style={{ display: 'block', color: '#77847a' }}>{quantityLabel(item.requested_quantity)} {item.default_unit} · {item.conversion_result}</small>}</td>
+            <td>{deliveredInUnit === null ? '—' : <>{quantityLabel(deliveredInUnit)} {unit}{converted && item.delivered_quantity !== null && <small style={{ display: 'block', color: '#77847a' }}>{quantityLabel(item.delivered_quantity)} {item.default_unit} no ERP</small>}</>}</td>
+          </tr>;
+        })}</tbody></table></div>
         {selected.status === 'Parcial' && <div className="notice notice-warning" style={{ marginTop: 14 }}>Atendimento parcial confirmado no ERP.</div>}
         {selected.warehouse_notes && <div className="notice notice-warning" style={{ marginTop: 14 }}><span><strong>Observações do Almoxarifado:</strong> {selected.warehouse_notes}</span></div>}
         {selected.responsible_name && <p className="stock-label">Responsável informado: {selected.responsible_name}{selected.finalized_at ? ` · ${new Date(selected.finalized_at).toLocaleString('pt-BR')}` : ''}</p>}

@@ -18,6 +18,8 @@ const localDateInputValue = (value = new Date()) => {
 };
 const qty = (value: number) => value.toLocaleString('pt-BR', { maximumFractionDigits: 4 });
 const dayLabel = (value: string) => new Date(`${value}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+const requestedQty = (item: MaterialRequest['items'][number]) => item.requested_unit_quantity ?? item.requested_quantity;
+const unitCode = (item: MaterialRequest['items'][number]) => item.unit_code ?? item.default_unit ?? '';
 
 export default function KanbanBoard({ onStart, onFinalize }: Props) {
   const [requests, setRequests] = useState<MaterialRequest[]>([]);
@@ -200,12 +202,12 @@ export default function KanbanBoard({ onStart, onFinalize }: Props) {
   async function finish(confirmed = false) {
     if (!selected) return;
     if (!responsible.trim()) return setError('Selecione ou informe quem está confirmando o atendimento.');
-    if (selected.items.some((item) => !Number.isSafeInteger(deliveries[item.item_index] ?? item.requested_quantity))) return setError('As quantidades entregues devem ser números inteiros.');
+    if (selected.items.some((item) => !Number.isSafeInteger(deliveries[item.item_index] ?? requestedQty(item)))) return setError('As quantidades entregues devem ser números inteiros.');
     setBusy(true); setError('');
     try {
       await onFinalize(selected.itecontrol, {
         responsible_name: responsible.trim(), warehouse_notes: notes.trim(), confirm_partial_without_note: confirmed,
-        deliveries: selected.items.map((item) => ({ item_index: item.item_index, quantity: deliveries[item.item_index] ?? item.requested_quantity })),
+        deliveries: selected.items.map((item) => ({ item_index: item.item_index, quantity: deliveries[item.item_index] ?? requestedQty(item) })),
       });
       setSelected(null); setNotes(''); setResponsible('');
       await reload();
@@ -218,7 +220,7 @@ export default function KanbanBoard({ onStart, onFinalize }: Props) {
 
   function openRequest(request: MaterialRequest) {
     setSelected(request); setNotes(request.warehouse_notes); setResponsible(request.responsible_name ?? '');
-    setDeliveries(Object.fromEntries(request.items.map((item) => [item.item_index, item.delivered_quantity ?? item.requested_quantity]))); setError('');
+    setDeliveries(Object.fromEntries(request.items.map((item) => [item.item_index, item.delivered_unit_quantity ?? item.delivered_quantity ?? requestedQty(item)]))); setError('');
   }
 
   const validDateRange = !dateFrom || !dateTo || dateFrom <= dateTo;
@@ -244,7 +246,7 @@ export default function KanbanBoard({ onStart, onFinalize }: Props) {
     <div className="kanban-grid">{columns.map((status) => <section className="kanban-column" key={status}><header className="kanban-head"><h2><StatusDot status={status} />{status}</h2><span className="kanban-count">{grouped[status].reduce((sum, day) => sum + day.requests.length, 0)}</span></header>
       {grouped[status].map((day) => <section className="kanban-date-group" key={`${status}-${day.date}`}><h3 className="kanban-date-heading">{dayLabel(day.date)}</h3>
         {day.requests.map((request) => <article className="kanban-card" key={request.itecontrol}><div className="kanban-card-top"><span className="request-number">{request.number}</span><span className="kanban-meta">{new Date(`${request.requested_date}T12:00:00`).toLocaleDateString('pt-BR')}</span></div>
-          <h3>{request.leader_name ?? '—'}</h3><div className="kanban-meta">{request.sector_name}</div><div className="kanban-items">{request.items.slice(0, 2).map((item) => `${qty(item.requested_quantity)}× ${item.description}`).join(' · ')}{request.items.length > 2 ? ` · +${request.items.length - 2} itens` : ''}</div>
+          <h3>{request.leader_name ?? '—'}</h3><div className="kanban-meta">{request.sector_name}</div><div className="kanban-items">{request.items.slice(0, 2).map((item) => `${qty(requestedQty(item))} ${unitCode(item)} × ${item.description}`).join(' · ')}{request.items.length > 2 ? ` · +${request.items.length - 2} itens` : ''}</div>
           {request.status === 'Parcial' && <div className="notice-inline status-parcial-inline">Atendida parcialmente no ERP.</div>}
           {request.erp_status === 'falhou' || request.erp_status === 'conflito' ? <div className="notice-inline">{request.erp_status === 'conflito' ? 'Conflito no ERP; exige revisão.' : 'Sincronização pendente; reabra para tentar novamente.'}</div> : null}
           {status === 'Pendente' ? <button className="button button-quiet full-width" disabled={busy} onClick={() => void start(request.itecontrol)}>Iniciar atendimento <ArrowRight size={15} /></button> : status === 'Em andamento' ? <button className="button button-primary full-width" disabled={busy} onClick={() => openRequest(request)}>{request.erp_status === 'falhou' ? 'Revisar e reenviar' : 'Conferir e confirmar'} <PackageCheck size={15} /></button> : <button className="button button-quiet full-width" onClick={() => openRequest(request)}>Ver detalhes</button>}
@@ -258,11 +260,16 @@ export default function KanbanBoard({ onStart, onFinalize }: Props) {
     </div>}
     {selected && <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><article className="dialog" role="dialog" aria-modal="true" aria-labelledby="handling-title">
       <header className="dialog-header"><div><span className="eyebrow">CONFERÊNCIA DO PEDIDO</span><h2 id="handling-title">{selected.number}</h2><span className="stock-label">{selected.leader_name ?? '—'} · {selected.sector_name}</span></div><button className="icon-button" onClick={() => setSelected(null)} aria-label="Fechar"><X size={18} /></button></header>
-      <div className="dialog-body">{selected.items.map((item) => <div className="cart-line" key={item.item_index}>
-        <div><strong>{item.description}</strong><small>{item.material_code} · pedido {qty(item.requested_quantity)}</small></div><span className="stock-label">A retirar</span>
-        <input aria-label={`Quantidade a entregar para ${item.material_code}`} className="cart-qty" type="number" min="0" step="1" inputMode="numeric" max={item.requested_quantity} value={deliveries[item.item_index] ?? item.requested_quantity} disabled={selected.status === 'Finalizada' || selected.status === 'Parcial' || selected.erp_status === 'conflito'} onChange={(event) => { const value = event.target.value; const amount = Number(value); if (value !== '' && !Number.isSafeInteger(amount)) { setError('As quantidades entregues devem ser números inteiros.'); return; } setDeliveries((state) => ({ ...state, [item.item_index]: Math.min(item.requested_quantity, Math.max(0, amount || 0)) })); setError(''); }} />
-        <span className="stock-label">/{qty(item.requested_quantity)}</span>
-      </div>)}
+      <div className="dialog-body">{selected.items.map((item) => {
+        const ordered = requestedQty(item);
+        const unit = unitCode(item);
+        const converted = Boolean(item.unit_code && item.default_unit && item.unit_code !== item.default_unit);
+        return <div className="cart-line" key={item.item_index}>
+        <div><strong>{item.description}</strong><small>{item.material_code} · pedido {qty(ordered)} {unit}</small>{converted && <small>{qty(item.requested_quantity)} {item.default_unit} na unidade padrão · {item.conversion_result}</small>}</div><span className="stock-label">A retirar ({unit || 'unidade'})</span>
+        <input aria-label={`Quantidade a entregar para ${item.material_code} em ${unit || 'unidade solicitada'}`} className="cart-qty" type="number" min="0" step="1" inputMode="numeric" max={ordered} value={deliveries[item.item_index] ?? ordered} disabled={selected.status === 'Finalizada' || selected.status === 'Parcial' || selected.erp_status === 'conflito'} onChange={(event) => { const value = event.target.value; const amount = Number(value); if (value !== '' && !Number.isSafeInteger(amount)) { setError('As quantidades entregues devem ser números inteiros.'); return; } setDeliveries((state) => ({ ...state, [item.item_index]: Math.min(ordered, Math.max(0, amount || 0)) })); setError(''); }} />
+        <span className="stock-label">/{qty(ordered)} {unit}</span>
+      </div>;
+      })}
         {selected.status !== 'Finalizada' && selected.status !== 'Parcial' && <div className="form-field" style={{ marginTop: 18 }}><label htmlFor="responsible-name">Responsável pela confirmação</label><input id="responsible-name" list="responsible-options" value={responsible} onChange={(event) => setResponsible(event.target.value)} placeholder="Selecione ou digite o nome" autoComplete="off" /><datalist id="responsible-options">{responsibles.map((name) => <option key={name} value={name} />)}</datalist></div>}
         <div className="form-field" style={{ marginTop: 18 }}><label htmlFor="warehouse-notes">Observações do Almoxarifado</label><textarea id="warehouse-notes" value={notes} disabled={selected.status === 'Finalizada' || selected.status === 'Parcial'} onChange={(event) => setNotes(event.target.value)} placeholder="Registre entrega parcial ou outras notas..." /></div>
         {error && <div className="notice notice-error" role="alert">{error}</div>}

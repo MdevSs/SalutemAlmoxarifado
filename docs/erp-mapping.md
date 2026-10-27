@@ -23,6 +23,14 @@ Essa redução limita transferência de dados e evita varredura de contagem comp
 
 > **A validar em LAN:** o dicionário não inclui o `CREATE VIEW`; confirme nomes/tipos das colunas com `information_schema.columns`/`pg_get_viewdef` somente em leitura no servidor autorizado, e confirme que os códigos da view correspondem à chave `public.produto.produto`. A descrição do dicionário também avisa que não é o schema completo de `produto`.
 
+## Unidade padrão e conversões
+
+O catálogo lê `public.produto.unimedida` como a unidade padrão do produto. Para os códigos da página, o adapter executa uma única consulta agrupada em `public.convers1`, filtrando `convprod` e lendo `cvunidade`, `cvuopera`, `cvucoefici`, `cvuresulta` e `cvunidesc`. Não consulta conversões produto a produto e não escreve nessas tabelas. A conta ERP precisa de permissão `SELECT` sobre a coluna `produto.unimedida` e as colunas de conversão; se a leitura de `convers1` falhar, o catálogo não anuncia opções incompletas.
+
+O formulário exige quantidade inteira na unidade escolhida. Operação `M` multiplica pela `cvucoefici`; operação `D` divide por ela. O backend valida a unidade e o coeficiente contra o ERP ao criar o pedido e salva no item JSONB a unidade escolhida, quantidade original, unidade padrão e snapshot do coeficiente/operação/expressão. Na baixa, usa o snapshot, arredonda uma vez com `ROUND_HALF_UP` para quatro casas e envia a quantidade convertida para `toqmovi.priquanti numeric(14,4)` na unidade padrão. A comparação de entrega parcial, validação de saldo e retry usam as quantidades canônicas na unidade padrão; a tela continua mostrando também a quantidade inteira na unidade escolhida.
+
+O dump de referência não documenta `convers1`; a estrutura e os exemplos informados para essa tabela são do responsável pelo sistema. Confirmar em leitura na LAN os nomes/tipos reais e a permissão da conta do aplicativo antes da implantação. Nenhum DDL de ERP é necessário.
+
 ## Movimentos `public.toqmovi`
 
 Chave primária observada: `(itecontrol, prisequen)`. Para cada item efetivamente atendido, a aplicação envia o conjunto completo das 93 colunas definidas no DDL recebido — não apenas os campos da chave e quantidade — para que os campos que o ERP espera não fiquem `NULL`.
@@ -36,7 +44,7 @@ Chave primária observada: `(itecontrol, prisequen)`. Para cada item efetivament
 | `pridata` | Data da requisição |
 | `priordem` | `0`; evita associar a linha a uma ordem de compra |
 | `priproduto` | Código retornado pelo ERP; o PostgreSQL completa `character(16)` com padding |
-| `priquanti` | Quantidade atendida positiva e inteira, `numeric(14,4)` (ex.: `3.0000`) |
+| `priquanti` | Quantidade atendida positiva na unidade padrão do produto, `numeric(14,4)`, após conversão e arredondamento a até quatro casas (ex.: `0.4718`; sem conversão, `3.0000`) |
 | `pridtalt` | Enviada como `CURRENT_DATE`; o gatilho `tg_toqmovi_datahora` pode sobrescrever |
 | `prihralt` | `CAST(LOCALTIME(0) AS text)`, sem fuso e no formato `HH:MM:SS` de 8 caracteres; o gatilho `tg_toqmovi_datahora` pode sobrescrever |
 
